@@ -18,21 +18,20 @@ import {
   setAnalysisCache,
 } from "./storage";
 
-// ── Generate edge ID ───────────────────────────────────────────
+// ── Generate edge ID ──────────────────────────────────────────────
 function generateEdgeId(market: Market): string {
   return `edge_${market.source}_${market.id}_${Date.now()}`;
 }
 
-// ── Check if a market needs re-analysis ────────────────────────
+// ── Check if a market needs re-analysis ───────────────────────────
 async function shouldAnalyze(market: Market): Promise<boolean> {
   const cached = await getAnalysisCache(market.id);
   if (!cached) return true;
-  // Re-analyze if price moved significantly
   const priceDiff = Math.abs(market.marketProb - cached.cachedProb);
-  return priceDiff >= 2; // 2% threshold
+  return priceDiff >= 2;
 }
 
-// ── Build Edge from Market + Analysis ──────────────────────────
+// ── Build Edge from Market + Analysis ─────────────────────────────
 function buildEdge(market: Market, analysis: EdgeAnalysis): Edge {
   const edgeSize = Math.abs(analysis.estimatedProbability - market.marketProb);
   return {
@@ -57,7 +56,7 @@ function buildEdge(market: Market, analysis: EdgeAnalysis): Edge {
   };
 }
 
-// ── Fisher-Yates shuffle ────────────────────────────────────────
+// ── Fisher-Yates shuffle ──────────────────────────────────────────
 function shuffle<T>(arr: T[]): T[] {
   const out = [...arr];
   for (let i = out.length - 1; i > 0; i--) {
@@ -67,94 +66,76 @@ function shuffle<T>(arr: T[]): T[] {
   return out;
 }
 
-// ── Smart volume-tier market selection ─────────────────────────
-// High-volume markets are efficiently priced — good to check but few edges.
-// Mid and low-volume markets are less watched and more likely to be mispriced.
-// We sample each tier separately and shuffle mid/low so every scan rotates
-// through different markets rather than always hitting the same top 20.
+// ── Smart volume-tier market selection ────────────────────────────
 function prioritizeMarkets(markets: Market[]): Market[] {
   const sorted = [...markets].sort((a, b) => b.volume - a.volume);
-
   const tierHigh = sorted.filter((m) => m.volume >= VOLUME_TIER_HIGH);
   const tierMid  = sorted.filter((m) => m.volume >= VOLUME_TIER_MID && m.volume < VOLUME_TIER_HIGH);
   const tierLow  = sorted.filter((m) => m.volume < VOLUME_TIER_MID);
 
   const selected = [
-    ...tierHigh.slice(0, TIER_HIGH_SAMPLE),   // Top 10 high-vol (deterministic)
-    ...shuffle(tierMid).slice(0, TIER_MID_SAMPLE), // 25 random mid-vol each run
-    ...shuffle(tierLow).slice(0, TIER_LOW_SAMPLE), // 15 random low-vol each run
+    ...tierHigh.slice(0, TIER_HIGH_SAMPLE),
+    ...shuffle(tierMid).slice(0, TIER_MID_SAMPLE),
+    ...shuffle(tierLow).slice(0, TIER_LOW_SAMPLE),
   ];
 
   console.log(
-    `[EdgeDetection] Market tiers — high: ${tierHigh.length}, mid: ${tierMid.length}, low: ${tierLow.length}`
+    `[EdgeDetection] Tiers — high:${tierHigh.length} mid:${tierMid.length} low:${tierLow.length}`
   );
   console.log(
-    `[EdgeDetection] Sampling — ${Math.min(tierHigh.length, TIER_HIGH_SAMPLE)} high + ${Math.min(tierMid.length, TIER_MID_SAMPLE)} mid + ${Math.min(tierLow.length, TIER_LOW_SAMPLE)} low = ${selected.length} total`
+    `[EdgeDetection] Selected ${selected.length} markets (max ${MAX_MARKETS_PER_RUN})`
   );
 
   return selected.slice(0, MAX_MARKETS_PER_RUN);
 }
 
-// ── Main pipeline ──────────────────────────────────────────────
+// ── Main pipeline ─────────────────────────────────────────────────
 export async function runEdgeDetection(options?: {
   forceRefresh?: boolean;
 }): Promise<Edge[]> {
-  console.log("[EdgeDetection] Starting edge detection run...");
+  console.log("[EdgeDetection] Starting run...");
 
-  // 1. Fetch markets (up to 500 from Polymarket)
+  // 1. Fetch markets
   const markets = await fetchMarkets({
     forceRefresh: options?.forceRefresh,
     limit: 500,
   });
   console.log(`[EdgeDetection] Fetched ${markets.length} markets`);
 
-  // 2. Select markets using volume-tier sampling
+  // 2. Volume-tier sampling
   const toConsider = prioritizeMarkets(markets);
 
-  // 3. Filter to markets that actually need fresh analysis
+  // 3. Filter to markets that need fresh analysis
   const toAnalyze: Market[] = [];
   for (const market of toConsider) {
-    const needed = await shouldAnalyze(market);
-    if (needed) toAnalyze.push(market);
+    if (await shouldAnalyze(market)) toAnalyze.push(market);
   }
-  console.log(`[EdgeDetection] ${toAnalyze.length} markets need fresh analysis`);
+  console.log(`[EdgeDetection] ${toAnalyze.length} need fresh analysis`);
 
-  // 4. Analyze in batches of 5 with rate-limit delay
-  const newEdges: Edge[] = [];
-  const batchSize = 5;
+  // 4. Run ALL markets in a single parallel batch — no inter-batch delay.
+  //    MAX_MARKETS_PER_RUN is set to 12 so this comfortably fits in 60 s.
+  const results = await Promise.allSettled(
+    toAnalyze.map(async (market) => {
+      const analysis = await analyzeMarket(market);
 
-  for (let i = 0; i < toAnalyze.length; i += batchSize) {
-    const batch = toAnalyze.slice(i, i + batchSize);
-    const results = await Promise.allSettled(
-      batch.map(async (market) => {
-        const analysis = await analyzeMarket(market);
+      await setAnalysisCache(market.id, {
+        cachedProb: market.marketProb,
+        analysis,
+        timestamp: Date.now(),
+      });
 
-        // Cache regardless of whether an edge was found
-        await setAnalysisCache(market.id, {
-          cachedProb: market.marketProb,
-          analysis,
-          timestamp: Date.now(),
-        });
-
-        if (analysis && analysis.hasEdge) {
-          const edge = buildEdge(market, analysis);
-          if (edge.edge >= MIN_EDGE) {
-            return edge;
-          }
-        }
-        return null;
-      })
-    );
-
-    for (const result of results) {
-      if (result.status === "fulfilled" && result.value) {
-        newEdges.push(result.value);
+      if (analysis && analysis.hasEdge) {
+        const edge = buildEdge(market, analysis);
+        if (edge.edge >= MIN_EDGE) return edge;
       }
-    }
+      return null;
+    })
+  );
 
-    // Rate limit between batches
-    if (i + batchSize < toAnalyze.length) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+  const newEdges: Edge[] = [];
+  for (const result of results) {
+    if (result.status === "fulfilled" && result.value) {
+      newEdges.push(result.value);
     }
   }
 
@@ -163,18 +144,20 @@ export async function runEdgeDetection(options?: {
     await storeEdge(edge);
   }
 
-  // 6. Sort by edge size × confidence weight
+  // 6. Sort by edge × confidence weight
   newEdges.sort((a, b) => {
     const aScore = a.edge * CONFIDENCE_ORDER[a.confidence];
     const bScore = b.edge * CONFIDENCE_ORDER[b.confidence];
     return bScore - aScore;
   });
 
-  console.log(`[EdgeDetection] Detected ${newEdges.length} new edges (MIN_EDGE=${MIN_EDGE}%)`);
+  console.log(
+    `[EdgeDetection] Done — ${newEdges.length} new edges found (MIN_EDGE=${MIN_EDGE}%)`
+  );
   return newEdges;
 }
 
-// ── Get all active edges from storage ─────────────────────────
+// ── Get all active edges from storage ────────────────────────────
 export async function getAllActiveEdges(): Promise<Edge[]> {
   const stored = await getActiveEdges();
   return stored.sort((a, b) => {
