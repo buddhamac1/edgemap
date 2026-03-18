@@ -68,7 +68,7 @@ export async function analyzeMarket(
     const prompt = buildPrompt(market);
 
     const message = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       max_tokens: 1024,
       temperature: 0.7,
       messages: [{ role: "user", content: prompt }],
@@ -97,9 +97,11 @@ export async function analyzeMarket(
       hasEdge: true,
       estimatedProbability: analysis.estimatedProbability,
       probabilityRangeLow:
-        analysis.probabilityRangeLow ?? analysis.estimatedProbability - 5,
+        analysis.probabilityRangeLow ??
+        analysis.estimatedProbability - 5,
       probabilityRangeHigh:
-        analysis.probabilityRangeHigh ?? analysis.estimatedProbability + 5,
+        analysis.probabilityRangeHigh ??
+        analysis.estimatedProbability + 5,
       confidence: analysis.confidence,
       blurb: analysis.blurb,
       signals: analysis.signals || [],
