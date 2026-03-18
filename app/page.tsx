@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { usePathname } from 'next/navigation';
 import Sidebar from '@/components/layout/Sidebar';
 import TopBar from '@/components/layout/TopBar';
@@ -16,6 +16,7 @@ export default function Dashboard() {
   const pathname = usePathname();
   const [edges, setEdges] = useState<Edge[]>([]);
   const [loading, setLoading] = useState(true);
+  const [scanning, setScanning] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [sortBy, setSortBy] = useState<'edge' | 'confidence' | 'recency'>('edge');
@@ -23,34 +24,31 @@ export default function Dashboard() {
   const [stats, setStats] = useState<AggregateStats | null>(null);
   const [lastScan, setLastScan] = useState<string>('');
 
-  // Fetch edges from API
-  useEffect(() => {
-    const fetchEdges = async () => {
-      try {
-        setLoading(true);
-        const response = await fetch('/api/edges');
-        if (response.ok) {
-          const data = await response.json();
-          setEdges(data);
-        } else {
-          // Fallback to mock data
-          setEdges(getMockEdges());
-        }
-      } catch (error) {
-        console.error('Failed to fetch edges:', error);
-        // Fallback to mock data
+  // Fetch edges from API — extracted so handleScanNow can call it too
+  const fetchEdges = useCallback(async () => {
+    try {
+      setLoading(true);
+      const response = await fetch('/api/edges');
+      if (response.ok) {
+        const data = await response.json();
+        setEdges(data);
+      } else {
         setEdges(getMockEdges());
-      } finally {
-        setLoading(false);
       }
-    };
+    } catch (error) {
+      console.error('Failed to fetch edges:', error);
+      setEdges(getMockEdges());
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
+  useEffect(() => {
     fetchEdges();
-
     // Auto-refresh every 60 seconds
     const interval = setInterval(fetchEdges, 60000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchEdges]);
 
   // Calculate stats
   useEffect(() => {
@@ -67,6 +65,8 @@ export default function Dashboard() {
         avgEdge: edges.reduce((sum, e) => sum + e.edge, 0) / edges.length || 0,
         bestEdge: Math.max(...edges.map((e) => e.edge), 0),
       });
+    } else {
+      setStats(null);
     }
   }, [edges]);
 
@@ -88,7 +88,7 @@ export default function Dashboard() {
     .sort((a, b) => {
       switch (sortBy) {
         case 'confidence':
-          return b.edge - a.edge; // Edges sorted by size
+          return b.edge - a.edge;
         case 'recency':
           return (
             new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime()
@@ -100,22 +100,31 @@ export default function Dashboard() {
     });
 
   const handleScanNow = async () => {
+    setScanning(true);
     try {
       const response = await fetch('/api/scan', { method: 'POST' });
       if (response.ok) {
-        const data = await response.json();
-        setEdges(data.edges);
+        // Re-fetch from /api/edges so we always show current storage state
+        // (with mock fallback if scan found 0 real edges)
+        await fetchEdges();
         setLastScan(new Date().toLocaleTimeString());
       }
     } catch (error) {
       console.error('Scan failed:', error);
+    } finally {
+      setScanning(false);
     }
   };
 
   return (
     <div className="flex h-screen bg-[#09090b]">
       {/* Sidebar */}
-      <Sidebar activePath={pathname} onScanNow={handleScanNow} lastScan={lastScan} />
+      <Sidebar
+        activePath={pathname}
+        onScanNow={handleScanNow}
+        lastScan={lastScan}
+        scanning={scanning}
+      />
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden md:pb-0 pb-20">
@@ -183,7 +192,7 @@ export default function Dashboard() {
                     Hit Rate
                   </p>
                   <p className="text-2xl font-bold text-cyan-400">
-                    {stats.hitRate.toFixed(1)}%
+                    {isNaN(stats.hitRate) ? '—' : `${stats.hitRate.toFixed(1)}%`}
                   </p>
                 </div>
                 <div className="bg-[#18181b] border border-[#27272a] rounded-lg p-4">
@@ -200,13 +209,17 @@ export default function Dashboard() {
             {/* Sort Dropdown and Results */}
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-semibold text-[#f4f4f5]">
-                {filteredEdges.length} edges found
+                {scanning ? (
+                  <span className="text-[#a1a1a6] animate-pulse">Scanning Polymarket…</span>
+                ) : (
+                  `${filteredEdges.length} edges found`
+                )}
               </h2>
               <SortDropdown value={sortBy} onChange={setSortBy} />
             </div>
 
-            {/* Loading State */}
-            {loading && (
+            {/* Loading / Scanning State */}
+            {(loading || scanning) && (
               <div className="space-y-4">
                 {[...Array(3)].map((_, i) => (
                   <div
@@ -222,7 +235,7 @@ export default function Dashboard() {
             )}
 
             {/* Edges List */}
-            {!loading && filteredEdges.length === 0 && (
+            {!loading && !scanning && filteredEdges.length === 0 && (
               <div className="text-center py-12">
                 <p className="text-[#a1a1a6] text-lg">
                   No edges found matching your filters
@@ -230,7 +243,7 @@ export default function Dashboard() {
               </div>
             )}
 
-            {!loading && filteredEdges.length > 0 && (
+            {!loading && !scanning && filteredEdges.length > 0 && (
               <div className="grid gap-4">
                 {filteredEdges.map((edge) => (
                   <EdgeCard
