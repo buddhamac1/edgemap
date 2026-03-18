@@ -1,29 +1,120 @@
-// ── Polymarket filters ───────────────────────────────────────────
-export const MIN_VOLUME = 1_000;       // minimum $ volume to consider
-export const MIN_EDGE   = 3;           // minimum % edge to store
+import { MarketCategory, ConfidenceGrade } from "./types";
 
-// ── Scan limits ───────────────────────────────────────────────────
-// Keep total low so the scan fits within the 60-second Vercel limit.
-// Each Claude call takes ~3-5s; running 12 in one batch takes ~5-8s total.
+// ── Polymarket ───────────────────────────────────────────────────
+export const POLYMARKET_BASE_URL =
+  process.env.POLYMARKET_API_URL || "https://clob.polymarket.com";
+export const POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com";
+
+// ── Thresholds ───────────────────────────────────────────────────
+export const MIN_VOLUME = 1_000;             // $1k minimum
+export const MIN_EDGE   = 3;                 // 3% minimum edge
+export const STALE_EDGE_HOURS = 24;
+export const CACHE_TTL_MINUTES = 5;
+export const ANALYSIS_CACHE_TTL_MINUTES = 60;
+export const PRICE_CHANGE_THRESHOLD = 2;
+
+// ── Scan limits ──────────────────────────────────────────────────
+// Keep small so scan completes in the 60-second Vercel window.
+// 12 markets run in one parallel batch take ~5-10s total.
 export const MAX_MARKETS_PER_RUN = 12;
 
-// ── Volume-tier sampling ──────────────────────────────────────────
-// High-vol markets are efficiently priced; mid/low are where edges hide.
-export const VOLUME_TIER_HIGH =  100_000;
-export const VOLUME_TIER_MID  =   10_000;
-export const TIER_HIGH_SAMPLE = 3;   // top-3 high-vol (deterministic)
-export const TIER_MID_SAMPLE  = 6;   // 6 random mid-vol each run
-export const TIER_LOW_SAMPLE  = 3;   // 3 random low-vol each run
+// ── Volume-tier sampling ─────────────────────────────────────────
+export const VOLUME_TIER_HIGH = 100_000;
+export const VOLUME_TIER_MID  =  10_000;
+export const TIER_HIGH_SAMPLE = 3;
+export const TIER_MID_SAMPLE  = 6;
+export const TIER_LOW_SAMPLE  = 3;
 
-// ── Edge age / expiry ─────────────────────────────────────────────
-export const EDGE_TTL_HOURS = 24;    // auto-expire edges after 24 h
-
-// ── Confidence ordering for sort score ───────────────────────────
-export const CONFIDENCE_ORDER: Record<string, number> = {
-  "A+": 6,
-  A:   5,
-  "B+": 4,
-  B:   3,
-  "C+": 2,
-  C:   1,
+// ── Confidence order ─────────────────────────────────────────────
+export const CONFIDENCE_ORDER: Record<ConfidenceGrade, number> = {
+  "A+": 6, A: 5, "B+": 4, B: 3, "C+": 2, C: 1,
 };
+
+// ── Category keywords ────────────────────────────────────────────
+export const CATEGORY_KEYWORDS: Record<
+  Exclude<MarketCategory, "Other">,
+  string[]
+> = {
+  NBA: [
+    "nba", "basketball", "lakers", "celtics", "warriors", "nuggets",
+    "bucks", "76ers", "sixers", "heat", "knicks", "nets", "suns",
+    "mavericks", "mavs", "clippers", "grizzlies", "cavaliers", "cavs",
+    "thunder", "timberwolves", "wolves", "pacers", "hawks", "bulls",
+    "magic", "pelicans", "kings", "raptors", "spurs", "rockets",
+    "pistons", "hornets", "wizards", "blazers", "jazz",
+    "lebron", "curry", "jokic", "giannis", "luka", "tatum",
+    "durant", "embiid", "doncic", "mvp", "finals", "playoff", "all-star",
+  ],
+  NFL: [
+    "nfl", "football", "super bowl", "chiefs", "eagles", "49ers", "niners",
+    "cowboys", "bills", "ravens", "lions", "dolphins", "jets", "bengals",
+    "texans", "packers", "rams", "steelers", "jaguars", "seahawks",
+    "chargers", "broncos", "browns", "vikings", "saints", "bears",
+    "falcons", "buccaneers", "bucs", "raiders", "colts", "panthers",
+    "commanders", "cardinals", "titans", "giants", "patriots",
+    "mahomes", "kelce", "hurts", "lamar", "allen", "touchdown", "quarterback",
+  ],
+  Sports: [
+    "mlb", "baseball", "nhl", "hockey", "soccer", "mls", "premier league",
+    "champions league", "world cup", "tennis", "grand slam", "wimbledon",
+    "ufc", "mma", "boxing", "f1", "formula 1", "golf", "pga",
+    "olympics", "world series", "stanley cup",
+  ],
+  Crypto: [
+    "bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "sol",
+    "dogecoin", "doge", "xrp", "ripple", "token", "blockchain", "defi",
+    "nft", "altcoin", "binance", "coinbase", "stablecoin", "memecoin",
+  ],
+  Politics: [
+    "election", "president", "senate", "congress", "house", "vote",
+    "democrat", "republican", "gop", "biden", "trump", "desantis",
+    "governor", "primary", "caucus", "poll", "swing state", "electoral",
+    "cabinet", "impeach", "legislation", "bill", "veto",
+    "supreme court", "scotus",
+  ],
+  Economy: [
+    "fed", "federal reserve", "cpi", "inflation", "gdp", "interest rate",
+    "rate cut", "rate hike", "unemployment", "jobs", "nonfarm", "payroll",
+    "recession", "s&p", "nasdaq", "dow", "treasury", "yield",
+    "debt ceiling", "tariff", "trade",
+  ],
+  Entertainment: [
+    "oscar", "emmy", "grammy", "golden globe", "box office", "album",
+    "movie", "film", "tv show", "netflix", "disney", "streaming",
+    "billboard", "concert", "tour", "award", "nomination",
+    "celebrity", "reality tv",
+  ],
+  Tech: [
+    "ai", "artificial intelligence", "openai", "google", "apple", "meta",
+    "microsoft", "tesla", "spacex", "launch", "ipo", "startup",
+    "semiconductor", "chip", "nvidia", "software", "app store",
+    "antitrust", "regulation",
+  ],
+};
+
+// ── UI colors ────────────────────────────────────────────────────
+export const CATEGORY_COLORS: Record<MarketCategory, string> = {
+  NBA:           "bg-orange-500/20 text-orange-400 border-orange-500/30",
+  NFL:           "bg-green-500/20 text-green-400 border-green-500/30",
+  Sports:        "bg-blue-500/20 text-blue-400 border-blue-500/30",
+  Crypto:        "bg-purple-500/20 text-purple-400 border-purple-500/30",
+  Politics:      "bg-red-500/20 text-red-400 border-red-500/30",
+  Economy:       "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
+  Entertainment: "bg-pink-500/20 text-pink-400 border-pink-500/30",
+  Tech:          "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
+  Other:         "bg-zinc-500/20 text-zinc-400 border-zinc-500/30",
+};
+
+export const CONFIDENCE_COLORS: Record<ConfidenceGrade, string> = {
+  "A+": "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
+  A:   "bg-emerald-500/15 text-emerald-400 border-emerald-500/25",
+  "B+": "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
+  B:   "bg-cyan-500/15 text-cyan-400 border-cyan-500/25",
+  "C+": "bg-amber-500/20 text-amber-400 border-amber-500/30",
+  C:   "bg-amber-500/15 text-amber-400 border-amber-500/25",
+};
+
+export const ALL_CATEGORIES: MarketCategory[] = [
+  "NBA", "NFL", "Sports", "Crypto", "Politics",
+  "Economy", "Entertainment", "Tech", "Other",
+];
