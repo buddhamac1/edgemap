@@ -24,7 +24,14 @@ function generateEdgeId(market: Market): string {
 }
 
 // ── Check if a market needs re-analysis ───────────────────────────
-async function shouldAnalyze(market: Market): Promise<boolean> {
+// If forceRefresh is true we always re-analyze, bypassing the cache.
+// This is critical: without it, forceRefresh only clears the Polymarket
+// fetch cache but leaves stale analysis results blocking Claude calls.
+async function shouldAnalyze(
+  market: Market,
+  forceRefresh?: boolean
+): Promise<boolean> {
+  if (forceRefresh) return true;
   const cached = await getAnalysisCache(market.id);
   if (!cached) return true;
   const priceDiff = Math.abs(market.marketProb - cached.cachedProb);
@@ -93,11 +100,12 @@ function prioritizeMarkets(markets: Market[]): Market[] {
 export async function runEdgeDetection(options?: {
   forceRefresh?: boolean;
 }): Promise<Edge[]> {
-  console.log("[EdgeDetection] Starting run...");
+  const forceRefresh = options?.forceRefresh ?? false;
+  console.log(`[EdgeDetection] Starting run (forceRefresh=${forceRefresh})...`);
 
-  // 1. Fetch markets
+  // 1. Fetch markets (forceRefresh bypasses the 5-min Polymarket cache)
   const markets = await fetchMarkets({
-    forceRefresh: options?.forceRefresh,
+    forceRefresh,
     limit: 500,
   });
   console.log(`[EdgeDetection] Fetched ${markets.length} markets`);
@@ -105,19 +113,27 @@ export async function runEdgeDetection(options?: {
   // 2. Volume-tier sampling
   const toConsider = prioritizeMarkets(markets);
 
-  // 3. Filter to markets that need fresh analysis
+  // 3. Filter to markets needing fresh analysis.
+  //    forceRefresh=true bypasses the per-market KV analysis cache so we
+  //    always re-run Claude — essential after changing the detection threshold.
   const toAnalyze: Market[] = [];
   for (const market of toConsider) {
-    if (await shouldAnalyze(market)) toAnalyze.push(market);
+    if (await shouldAnalyze(market, forceRefresh)) toAnalyze.push(market);
   }
-  console.log(`[EdgeDetection] ${toAnalyze.length} need fresh analysis`);
+  console.log(`[EdgeDetection] ${toAnalyze.length} markets queued for Claude`);
 
-  // 4. Run ALL markets in a single parallel batch — no inter-batch delay.
-  //    MAX_MARKETS_PER_RUN is set to 12 so this comfortably fits in 60 s.
+  if (toAnalyze.length === 0) {
+    console.log("[EdgeDetection] Nothing to analyze — all markets cached");
+    return [];
+  }
+
+  // 4. Run all markets in one parallel batch (no inter-batch delay).
+  //    MAX_MARKETS_PER_RUN=12 keeps this well inside the 60-second limit.
   const results = await Promise.allSettled(
     toAnalyze.map(async (market) => {
       const analysis = await analyzeMarket(market);
 
+      // Cache regardless of whether an edge was found
       await setAnalysisCache(market.id, {
         cachedProb: market.marketProb,
         analysis,
@@ -152,7 +168,7 @@ export async function runEdgeDetection(options?: {
   });
 
   console.log(
-    `[EdgeDetection] Done — ${newEdges.length} new edges found (MIN_EDGE=${MIN_EDGE}%)`
+    `[EdgeDetection] Done — ${newEdges.length} new edges (MIN_EDGE=${MIN_EDGE}%)`
   );
   return newEdges;
 }
