@@ -21,6 +21,7 @@ export default function Dashboard() {
   const [sortBy, setSortBy] = useState<'edge' | 'confidence' | 'recency'>('edge');
   const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
   const [stats, setStats] = useState<AggregateStats | null>(null);
+  const [lastScan, setLastScan] = useState<string>('');
 
   // Fetch edges from API
   useEffect(() => {
@@ -57,15 +58,13 @@ export default function Dashboard() {
       const activeEdges = edges.filter((e) => e.status === 'active');
       const hits = edges.filter((e) => e.outcome === 'hit').length;
       const misses = edges.filter((e) => e.outcome === 'miss').length;
-
       setStats({
         totalSignals: edges.length,
         activeSignals: activeEdges.length,
         hits,
         misses,
         hitRate: edges.length > 0 ? (hits / (hits + misses)) * 100 : 0,
-        avgEdge:
-          edges.reduce((sum, e) => sum + e.edge, 0) / edges.length || 0,
+        avgEdge: edges.reduce((sum, e) => sum + e.edge, 0) / edges.length || 0,
         bestEdge: Math.max(...edges.map((e) => e.edge), 0),
       });
     }
@@ -92,8 +91,7 @@ export default function Dashboard() {
           return b.edge - a.edge; // Edges sorted by size
         case 'recency':
           return (
-            new Date(b.detectedAt).getTime() -
-            new Date(a.detectedAt).getTime()
+            new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime()
           );
         case 'edge':
         default:
@@ -103,10 +101,11 @@ export default function Dashboard() {
 
   const handleScanNow = async () => {
     try {
-      const response = await fetch('/api/edges', { method: 'POST' });
+      const response = await fetch('/api/scan', { method: 'POST' });
       if (response.ok) {
-        const newEdges = await response.json();
-        setEdges(newEdges);
+        const data = await response.json();
+        setEdges(data.edges);
+        setLastScan(new Date().toLocaleTimeString());
       }
     } catch (error) {
       console.error('Scan failed:', error);
@@ -116,7 +115,7 @@ export default function Dashboard() {
   return (
     <div className="flex h-screen bg-[#09090b]">
       {/* Sidebar */}
-      <Sidebar activePath={pathname} onScanNow={handleScanNow} />
+      <Sidebar activePath={pathname} onScanNow={handleScanNow} lastScan={lastScan} />
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden md:pb-0 pb-20">
@@ -280,7 +279,6 @@ export default function Dashboard() {
                 </svg>
               </button>
             </div>
-
             <div className="p-6 space-y-6">
               {/* Category and Confidence */}
               <div className="flex items-center gap-4">
@@ -415,4 +413,4 @@ export default function Dashboard() {
       )}
     </div>
   );
-}
+    }
