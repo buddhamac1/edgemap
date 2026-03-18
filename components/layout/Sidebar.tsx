@@ -7,12 +7,14 @@ interface SidebarProps {
   activePath: string;
   onScanNow?: () => void;
   lastScan?: string;
+  scanning?: boolean;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
   activePath,
   onScanNow,
   lastScan,
+  scanning = false,
 }) => {
   const [isMounted, setIsMounted] = useState(false);
 
@@ -157,17 +159,51 @@ const Sidebar: React.FC<SidebarProps> = ({
         <div className="mb-4 px-2 py-3 bg-edge-card/50 rounded-lg">
           <p className="text-xs text-edge-dim mb-1">Last scan</p>
           <p className="text-sm font-semibold text-edge-text">
-            {lastScan || 'Never'}
+            {scanning ? (
+              <span className="text-edge-accent animate-pulse">Scanning markets…</span>
+            ) : (
+              lastScan || 'Never'
+            )}
           </p>
         </div>
 
         {/* Scan Now Button */}
         <button
           onClick={onScanNow}
-          className="w-full px-4 py-2 bg-edge-accent text-edge-bg font-semibold rounded-lg hover:bg-edge-accent-hover transition-colors text-sm"
-          aria-label="Perform manual scan now"
+          disabled={scanning}
+          className={`w-full px-4 py-2 font-semibold rounded-lg transition-all text-sm flex items-center justify-center gap-2 ${
+            scanning
+              ? 'bg-edge-accent/60 text-edge-bg cursor-not-allowed'
+              : 'bg-edge-accent text-edge-bg hover:bg-edge-accent-hover'
+          }`}
+          aria-label={scanning ? 'Scan in progress' : 'Perform manual scan now'}
         >
-          Scan Now
+          {scanning ? (
+            <>
+              <svg
+                className="w-4 h-4 animate-spin"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
+              Scanning…
+            </>
+          ) : (
+            'Scan Now'
+          )}
         </button>
       </div>
     </aside>
