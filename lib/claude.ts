@@ -9,18 +9,19 @@ Given this prediction market:
 - Question: {question}
 - Current market implied probability: {marketProb}%
 - Category: {category}
-- Market volume: ${"{volume}"}
+- Market volume: {volume}
 - Resolution date: {endDate}
 
 Analyze whether this market is mispriced. Consider:
 1. Base rates and historical data for similar events
 2. Current situational factors the market may not be pricing in
-3. Known biases in prediction markets (favorite-longshot bias, recency bias, etc.)
+3. Known biases in prediction markets (favorite-longshot bias, recency bias, public money bias, etc.)
 4. Any structural reasons the market could be slow to update
+5. For lower-volume markets: less sophisticated money may be pricing it, creating more opportunity
 
-If you detect a meaningful edge (5%+ difference between market price and your estimated true probability), provide your analysis.
+Your threshold for calling an edge is 3%+ difference between your estimated true probability and the current market price. Be willing to call edges on markets where you have genuine signal — these are deliberately sourced from less-watched markets where mispricings are more common.
 
-Respond in JSON format ONLY (no markdown, no code fences):
+If you detect an edge (3%+ difference), provide your analysis. Respond in JSON format ONLY (no markdown, no code fences):
 {
   "hasEdge": boolean,
   "estimatedProbability": number (0-100),
@@ -40,7 +41,8 @@ Confidence grading:
 - B: Weak signal, limited data, speculative but plausible
 - C+/C: Marginal, worth watching but low conviction
 
-If no meaningful edge exists, respond: { "hasEdge": false }
+If no edge exists (market looks efficiently priced), respond ONLY:
+{ "hasEdge": false }
 
 CRITICAL STYLE RULES FOR THE BLURB:
 - Be specific. Use numbers, names, dates.
@@ -51,7 +53,8 @@ CRITICAL STYLE RULES FOR THE BLURB:
 - Make the reader feel like they're getting insider-level insight`;
 
 function buildPrompt(market: Market): string {
-  return ANALYSIS_PROMPT.replace("{question}", market.question)
+  return ANALYSIS_PROMPT
+    .replace("{question}", market.question)
     .replace("{marketProb}", market.marketProb.toString())
     .replace("{category}", market.category)
     .replace("{volume}", `$${market.volume.toLocaleString()}`)
@@ -67,23 +70,20 @@ export async function analyzeMarket(
     const message = await client.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 1024,
-      temperature: 0.3,
+      temperature: 0.7,
       messages: [{ role: "user", content: prompt }],
     });
 
-    // Extract text from response
     const textBlock = message.content.find((block) => block.type === "text");
     if (!textBlock || textBlock.type !== "text") return null;
 
     const raw = textBlock.text.trim();
-
-    // Parse JSON — handle potential markdown code fences
+    // Handle potential markdown code fences
     const jsonStr = raw.replace(/^```json?\s*/, "").replace(/\s*```$/, "");
     const analysis = JSON.parse(jsonStr);
 
     if (!analysis.hasEdge) return null;
 
-    // Validate required fields
     if (
       typeof analysis.estimatedProbability !== "number" ||
       !analysis.confidence ||
@@ -96,8 +96,10 @@ export async function analyzeMarket(
     return {
       hasEdge: true,
       estimatedProbability: analysis.estimatedProbability,
-      probabilityRangeLow: analysis.probabilityRangeLow ?? analysis.estimatedProbability - 5,
-      probabilityRangeHigh: analysis.probabilityRangeHigh ?? analysis.estimatedProbability + 5,
+      probabilityRangeLow:
+        analysis.probabilityRangeLow ?? analysis.estimatedProbability - 5,
+      probabilityRangeHigh:
+        analysis.probabilityRangeHigh ?? analysis.estimatedProbability + 5,
       confidence: analysis.confidence,
       blurb: analysis.blurb,
       signals: analysis.signals || [],
