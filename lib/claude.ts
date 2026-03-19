@@ -1,115 +1,163 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { Market, EdgeAnalysis } from "./types";
+import { MIN_EDGE } from "./constants";
 
-const client = new Anthropic();
+// Minimum Jaccard similarity to accept a question match
+const MATCH_THRESHOLD = 0.3;
 
-const ANALYSIS_PROMPT = `You are an expert prediction market analyst and quantitative handicapper. You identify mispriced markets by combining statistical analysis, situational factors, and historical patterns.
-
-Given this prediction market:
-- Question: {question}
-- Current market implied probability: {marketProb}%
-- Category: {category}
-- Market volume: {volume}
-- Resolution date: {endDate}
-
-Analyze whether this market is mispriced. Consider:
-1. Base rates and historical data for similar events
-2. Current situational factors the market may not be pricing in
-3. Known biases in prediction markets (favorite-longshot bias, recency bias, public money bias, etc.)
-4. Any structural reasons the market could be slow to update
-5. For lower-volume markets: less sophisticated money may be pricing it, creating more opportunity
-
-Your threshold for calling an edge is 3%+ difference between your estimated true probability and the current market price. Be willing to call edges on markets where you have genuine signal — these are deliberately sourced from less-watched markets where mispricings are more common.
-
-If you detect an edge (3%+ difference), provide your analysis. Respond in JSON format ONLY (no markdown, no code fences):
-{
-  "hasEdge": boolean,
-  "estimatedProbability": number (0-100),
-  "probabilityRangeLow": number,
-  "probabilityRangeHigh": number,
-  "confidence": "A+" | "A" | "B+" | "B" | "C+" | "C",
-  "blurb": "One sharp paragraph explaining the edge. Be specific. Reference real data points, stats, and situational factors. Sound like a smart handicapper, not a generic AI. No hedging language.",
-  "signals": ["signal 1", "signal 2", "signal 3"],
-  "supportingStats": "Key statistical backing for the edge",
-  "similarSetups": "Historical analog or comparable situation"
+interface ExternalMarket {
+  question: string;
+  probability: number; // 0-100
+  source: string;
 }
 
-Confidence grading:
-- A+: Multiple strong independent signals, clear historical precedent, high conviction
-- A: Strong signal with good data support, some uncertainty
-- B+: Moderate signal, reasonable data but some ambiguity
-- B: Weak signal, limited data, speculative but plausible
-- C+/C: Marginal, worth watching but low conviction
+function tokenize(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 3)
+  );
+}
 
-If no edge exists (market looks efficiently priced), respond ONLY:
-{ "hasEdge": false }
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  const intersection = new Set([...a].filter((x) => b.has(x)));
+  const union = new Set([...a, ...b]);
+  return union.size === 0 ? 0 : intersection.size / union.size;
+}
 
-CRITICAL STYLE RULES FOR THE BLURB:
-- Be specific. Use numbers, names, dates.
-- Sound like a sharp analyst, not a cautious AI.
-- No phrases like "it's worth noting" or "it remains to be seen"
-- Reference concrete data: win-loss records, percentages, dollar amounts, polling numbers
-- Keep it to 2-3 sentences max
-- Make the reader feel like they're getting insider-level insight`;
+async function searchManifold(question: string): Promise<ExternalMarket | null> {
+  try {
+    const url =
+      `https://api.manifold.markets/v0/search-markets?term=${encodeURIComponent(
+        question.slice(0, 100)
+      )}&limit=8&filter=open`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!res.ok) return null;
+    const markets = await res.json();
 
-function buildPrompt(market: Market): string {
-  return ANALYSIS_PROMPT
-    .replace("{question}", market.question)
-    .replace("{marketProb}", market.marketProb.toString())
-    .replace("{category}", market.category)
-    .replace("{volume}", `$${market.volume.toLocaleString()}`)
-    .replace("{endDate}", market.endDate || "TBD");
+    const qTokens = tokenize(question);
+    let best: ExternalMarket | null = null;
+    let bestScore = 0;
+
+    for (const m of markets) {
+      if (m.isResolved || m.outcomeType !== "BINARY" || m.probability == null) continue;
+      const score = jaccardSimilarity(qTokens, tokenize(m.question ?? ""));
+      if (score > bestScore && score >= MATCH_THRESHOLD) {
+        bestScore = score;
+        best = {
+          question: m.question,
+          probability: Math.round(m.probability * 100),
+          source: "Manifold",
+        };
+      }
+    }
+    return best;
+  } catch {
+    return null;
+  }
+}
+
+async function searchMetaculus(question: string): Promise<ExternalMarket | null> {
+  try {
+    const url =
+      `https://www.metaculus.com/api2/questions/?search=${encodeURIComponent(
+        question.slice(0, 80)
+      )}&limit=8&format=json&type=forecast`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const results: unknown[] = data.results ?? [];
+
+    const qTokens = tokenize(question);
+    let best: ExternalMarket | null = null;
+    let bestScore = 0;
+
+    for (const q of results as Record<string, unknown>[]) {
+      const probObj =
+        (q.community_prediction as Record<string, unknown> | undefined)
+          ?.full as Record<string, unknown> | undefined;
+      const p = probObj?.q2 as number | undefined;
+      if (p == null || q.resolution != null) continue;
+      const score = jaccardSimilarity(qTokens, tokenize((q.title as string) ?? ""));
+      if (score > bestScore && score >= MATCH_THRESHOLD) {
+        bestScore = score;
+        best = {
+          question: q.title as string,
+          probability: Math.round(p * 100),
+          source: "Metaculus",
+        };
+      }
+    }
+    return best;
+  } catch {
+    return null;
+  }
+}
+
+function gradeConfidence(
+  diff: number,
+  sourceCount: number
+): EdgeAnalysis["confidence"] {
+  if (sourceCount >= 2 && diff >= 8) return "A+";
+  if (diff >= 10) return "A+";
+  if (diff >= 8) return "A";
+  if (diff >= 6) return "B+";
+  if (diff >= 4) return "B";
+  return "C+";
 }
 
 export async function analyzeMarket(
   market: Market
 ): Promise<EdgeAnalysis | null> {
   try {
-    const prompt = buildPrompt(market);
+    const [manifold, metaculus] = await Promise.all([
+      searchManifold(market.question),
+      searchMetaculus(market.question),
+    ]);
 
-    const message = await client.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1024,
-      temperature: 0.7,
-      messages: [{ role: "user", content: prompt }],
-    });
+    const sources = [manifold, metaculus].filter(Boolean) as ExternalMarket[];
+    if (sources.length === 0) return null;
 
-    const textBlock = message.content.find((block) => block.type === "text");
-    if (!textBlock || textBlock.type !== "text") return null;
+    const avgExternal = Math.round(
+      sources.reduce((sum, s) => sum + s.probability, 0) / sources.length
+    );
 
-    const raw = textBlock.text.trim();
-    // Handle potential markdown code fences
-    const jsonStr = raw.replace(/^```json?\s*/, "").replace(/\s*```$/, "");
-    const analysis = JSON.parse(jsonStr);
+    const diff = Math.abs(avgExternal - market.marketProb);
+    if (diff < MIN_EDGE) return null;
 
-    if (!analysis.hasEdge) return null;
+    const direction = avgExternal > market.marketProb ? "YES" : "NO";
+    const confidence = gradeConfidence(diff, sources.length);
 
-    if (
-      typeof analysis.estimatedProbability !== "number" ||
-      !analysis.confidence ||
-      !analysis.blurb
-    ) {
-      console.error("Invalid analysis response shape", analysis);
-      return null;
-    }
+    const signals = [
+      ...sources.map(
+        (s) => `${s.source}: ${s.probability}% vs Polymarket ${market.marketProb}%`
+      ),
+      `Cross-market divergence: ${diff} percentage points`,
+    ];
+
+    const sourceNames = sources.map((s) => s.source).join(" and ");
+    const blurb =
+      `${sourceNames} price this at ${avgExternal}%, a ${diff}-point gap from Polymarket's ${market.marketProb}%. ` +
+      `Crowd consensus across independent markets indicates ${direction} is mispriced — ` +
+      `$${Math.round(market.volume).toLocaleString()} in Polymarket volume has not closed the spread.`;
 
     return {
       hasEdge: true,
-      estimatedProbability: analysis.estimatedProbability,
-      probabilityRangeLow:
-        analysis.probabilityRangeLow ??
-        analysis.estimatedProbability - 5,
-      probabilityRangeHigh:
-        analysis.probabilityRangeHigh ??
-        analysis.estimatedProbability + 5,
-      confidence: analysis.confidence,
-      blurb: analysis.blurb,
-      signals: analysis.signals || [],
-      supportingStats: analysis.supportingStats || "",
-      similarSetups: analysis.similarSetups || "",
+      estimatedProbability: avgExternal,
+      probabilityRangeLow: Math.min(...sources.map((s) => s.probability)) - 2,
+      probabilityRangeHigh: Math.max(...sources.map((s) => s.probability)) + 2,
+      confidence,
+      blurb,
+      signals,
+      supportingStats: sources.map((s) => `${s.source}: ${s.probability}%`).join(", "),
+      similarSetups:
+        sources.length >= 2
+          ? `Confirmed across ${sources.length} independent prediction markets`
+          : `Sourced from ${sources[0].source}`,
     };
   } catch (error) {
-    console.error(`Claude analysis failed for market ${market.id}:`, error);
+    console.error(`Cross-market analysis failed for market ${market.id}:`, error);
     return null;
   }
 }
