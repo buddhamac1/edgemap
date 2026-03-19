@@ -10,7 +10,6 @@ import { CategoryChip } from '@/components/ui/CategoryChip';
 import { SortDropdown } from '@/components/ui/SortDropdown';
 import { ALL_CATEGORIES } from '@/lib/constants';
 import { Edge, AggregateStats } from '@/lib/types';
-import { getMockEdges } from '@/data/mock-edges';
 
 export default function Dashboard() {
   const pathname = usePathname();
@@ -24,7 +23,7 @@ export default function Dashboard() {
   const [stats, setStats] = useState<AggregateStats | null>(null);
   const [lastScan, setLastScan] = useState<string>('');
 
-  // Fetch edges from API — extracted so handleScanNow can call it too
+  // Fetch edges from storage — only called on mount and after manual scan
   const fetchEdges = useCallback(async () => {
     try {
       setLoading(true);
@@ -33,35 +32,34 @@ export default function Dashboard() {
         const data = await response.json();
         setEdges(data);
       } else {
-        setEdges(getMockEdges());
+        setEdges([]);
       }
     } catch (error) {
       console.error('Failed to fetch edges:', error);
-      setEdges(getMockEdges());
+      setEdges([]);
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Load stored edges once on mount — no polling interval
   useEffect(() => {
     fetchEdges();
-    // Auto-refresh every 60 seconds
-    const interval = setInterval(fetchEdges, 60000);
-    return () => clearInterval(interval);
   }, [fetchEdges]);
 
-  // Calculate stats
+  // Calculate stats from current edges
   useEffect(() => {
     if (edges.length > 0) {
       const activeEdges = edges.filter((e) => e.status === 'active');
       const hits = edges.filter((e) => e.outcome === 'hit').length;
       const misses = edges.filter((e) => e.outcome === 'miss').length;
+      const total = hits + misses;
       setStats({
         totalSignals: edges.length,
         activeSignals: activeEdges.length,
         hits,
         misses,
-        hitRate: edges.length > 0 ? (hits / (hits + misses)) * 100 : 0,
+        hitRate: total > 0 ? (hits / total) * 100 : NaN,
         avgEdge: edges.reduce((sum, e) => sum + e.edge, 0) / edges.length || 0,
         bestEdge: Math.max(...edges.map((e) => e.edge), 0),
       });
@@ -91,7 +89,8 @@ export default function Dashboard() {
           return b.edge - a.edge;
         case 'recency':
           return (
-            new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime()
+            new Date(b.detectedAt).getTime() -
+            new Date(a.detectedAt).getTime()
           );
         case 'edge':
         default:
@@ -104,8 +103,6 @@ export default function Dashboard() {
     try {
       const response = await fetch('/api/scan', { method: 'POST' });
       if (response.ok) {
-        // Re-fetch from /api/edges so we always show current storage state
-        // (with mock fallback if scan found 0 real edges)
         await fetchEdges();
         setLastScan(new Date().toLocaleTimeString());
       }
@@ -172,45 +169,31 @@ export default function Dashboard() {
             {stats && (
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
                 <div className="bg-[#18181b] border border-[#27272a] rounded-lg p-4">
-                  <p className="text-[#a1a1a6] text-sm font-medium mb-1">
-                    Total Edges
-                  </p>
-                  <p className="text-2xl font-bold text-[#f4f4f5]">
-                    {stats.totalSignals}
-                  </p>
+                  <p className="text-[#a1a1a6] text-sm font-medium mb-1">Total Edges</p>
+                  <p className="text-2xl font-bold text-[#f4f4f5]">{stats.totalSignals}</p>
                 </div>
                 <div className="bg-[#18181b] border border-[#27272a] rounded-lg p-4">
-                  <p className="text-[#a1a1a6] text-sm font-medium mb-1">
-                    Active
-                  </p>
-                  <p className="text-2xl font-bold text-emerald-400">
-                    {stats.activeSignals}
-                  </p>
+                  <p className="text-[#a1a1a6] text-sm font-medium mb-1">Active</p>
+                  <p className="text-2xl font-bold text-emerald-400">{stats.activeSignals}</p>
                 </div>
                 <div className="bg-[#18181b] border border-[#27272a] rounded-lg p-4">
-                  <p className="text-[#a1a1a6] text-sm font-medium mb-1">
-                    Hit Rate
-                  </p>
+                  <p className="text-[#a1a1a6] text-sm font-medium mb-1">Hit Rate</p>
                   <p className="text-2xl font-bold text-cyan-400">
                     {isNaN(stats.hitRate) ? '—' : `${stats.hitRate.toFixed(1)}%`}
                   </p>
                 </div>
                 <div className="bg-[#18181b] border border-[#27272a] rounded-lg p-4">
-                  <p className="text-[#a1a1a6] text-sm font-medium mb-1">
-                    Avg Edge
-                  </p>
-                  <p className="text-2xl font-bold text-orange-400">
-                    {stats.avgEdge.toFixed(1)}%
-                  </p>
+                  <p className="text-[#a1a1a6] text-sm font-medium mb-1">Avg Edge</p>
+                  <p className="text-2xl font-bold text-orange-400">{stats.avgEdge.toFixed(1)}%</p>
                 </div>
               </div>
             )}
 
-            {/* Sort Dropdown and Results */}
+            {/* Sort Dropdown and Results Count */}
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-semibold text-[#f4f4f5]">
                 {scanning ? (
-                  <span className="text-[#a1a1a6] animate-pulse">Scanning Polymarket…</span>
+                  <span className="text-[#a1a1a6] animate-pulse">Scanning markets…</span>
                 ) : (
                   `${filteredEdges.length} edges found`
                 )}
@@ -218,7 +201,7 @@ export default function Dashboard() {
               <SortDropdown value={sortBy} onChange={setSortBy} />
             </div>
 
-            {/* Loading / Scanning State */}
+            {/* Loading / Scanning skeleton */}
             {(loading || scanning) && (
               <div className="space-y-4">
                 {[...Array(3)].map((_, i) => (
@@ -234,15 +217,14 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Edges List */}
+            {/* Empty state */}
             {!loading && !scanning && filteredEdges.length === 0 && (
               <div className="text-center py-12">
-                <p className="text-[#a1a1a6] text-lg">
-                  No edges found matching your filters
-                </p>
+                <p className="text-[#a1a1a6] text-lg">No edges found matching your filters</p>
               </div>
             )}
 
+            {/* Edge cards */}
             {!loading && !scanning && filteredEdges.length > 0 && (
               <div className="grid gap-4">
                 {filteredEdges.map((edge) => (
@@ -277,23 +259,13 @@ export default function Dashboard() {
                 onClick={() => setSelectedEdge(null)}
                 className="text-[#a1a1a6] hover:text-[#f4f4f5] transition-colors"
               >
-                <svg
-                  className="w-6 h-6"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
+
             <div className="p-6 space-y-6">
-              {/* Category and Confidence */}
               <div className="flex items-center gap-4">
                 <CategoryChip category={selectedEdge.category} />
                 <span className="px-3 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full text-sm font-medium">
@@ -301,14 +273,10 @@ export default function Dashboard() {
                 </span>
               </div>
 
-              {/* Event */}
               <div>
-                <h3 className="text-lg font-semibold text-[#f4f4f5] mb-2">
-                  {selectedEdge.event}
-                </h3>
+                <h3 className="text-lg font-semibold text-[#f4f4f5] mb-2">{selectedEdge.event}</h3>
               </div>
 
-              {/* Edge Size */}
               <div className="bg-[#09090b] border border-[#27272a] rounded-lg p-4">
                 <p className="text-[#a1a1a6] text-sm mb-2">Edge Size</p>
                 <p className="text-3xl font-bold text-cyan-400">
@@ -317,31 +285,23 @@ export default function Dashboard() {
                 </p>
               </div>
 
-              {/* Probabilities */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-[#09090b] border border-[#27272a] rounded-lg p-4">
                   <p className="text-[#a1a1a6] text-sm mb-2">Market Probability</p>
-                  <p className="text-2xl font-bold text-orange-400">
-                    {selectedEdge.marketProb.toFixed(1)}%
-                  </p>
+                  <p className="text-2xl font-bold text-orange-400">{selectedEdge.marketProb.toFixed(1)}%</p>
                 </div>
                 <div className="bg-[#09090b] border border-[#27272a] rounded-lg p-4">
-                  <p className="text-[#a1a1a6] text-sm mb-2">AI Probability</p>
-                  <p className="text-2xl font-bold text-emerald-400">
-                    {selectedEdge.aiProb.toFixed(1)}%
-                  </p>
+                  <p className="text-[#a1a1a6] text-sm mb-2">Cross-Market Estimate</p>
+                  <p className="text-2xl font-bold text-emerald-400">{selectedEdge.aiProb.toFixed(1)}%</p>
                 </div>
               </div>
 
-              {/* Confidence Range */}
               <div className="bg-[#09090b] border border-[#27272a] rounded-lg p-4">
                 <p className="text-[#a1a1a6] text-sm mb-3">Confidence Range</p>
                 <div className="space-y-2">
                   <div className="flex justify-between text-sm">
                     <span className="text-[#a1a1a6]">Low</span>
-                    <span className="text-[#f4f4f5] font-medium">
-                      {selectedEdge.aiProbLow.toFixed(1)}%
-                    </span>
+                    <span className="text-[#f4f4f5] font-medium">{selectedEdge.aiProbLow.toFixed(1)}%</span>
                   </div>
                   <div className="w-full bg-[#27272a] rounded-full h-2">
                     <div
@@ -353,31 +313,22 @@ export default function Dashboard() {
                   </div>
                   <div className="flex justify-between text-sm">
                     <span className="text-[#a1a1a6]">High</span>
-                    <span className="text-[#f4f4f5] font-medium">
-                      {selectedEdge.aiProbHigh.toFixed(1)}%
-                    </span>
+                    <span className="text-[#f4f4f5] font-medium">{selectedEdge.aiProbHigh.toFixed(1)}%</span>
                   </div>
                 </div>
               </div>
 
-              {/* Blurb */}
               <div className="bg-[#09090b] border border-[#27272a] rounded-lg p-4">
                 <h4 className="text-[#f4f4f5] font-semibold mb-3">Analysis</h4>
-                <p className="text-[#a1a1a6] text-sm leading-relaxed">
-                  {selectedEdge.blurb}
-                </p>
+                <p className="text-[#a1a1a6] text-sm leading-relaxed">{selectedEdge.blurb}</p>
               </div>
 
-              {/* Signals */}
               {selectedEdge.signals.length > 0 && (
                 <div className="bg-[#09090b] border border-[#27272a] rounded-lg p-4">
                   <h4 className="text-[#f4f4f5] font-semibold mb-3">Signals</h4>
                   <div className="flex flex-wrap gap-2">
                     {selectedEdge.signals.map((signal, idx) => (
-                      <span
-                        key={idx}
-                        className="px-3 py-1 bg-[#27272a] text-[#a1a1a6] text-xs rounded-full"
-                      >
+                      <span key={idx} className="px-3 py-1 bg-[#27272a] text-[#a1a1a6] text-xs rounded-full">
                         {signal}
                       </span>
                     ))}
@@ -385,31 +336,20 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {/* Supporting Stats */}
               {selectedEdge.supportingStats && (
                 <div className="bg-[#09090b] border border-[#27272a] rounded-lg p-4">
-                  <h4 className="text-[#f4f4f5] font-semibold mb-3">
-                    Supporting Stats
-                  </h4>
-                  <p className="text-[#a1a1a6] text-sm leading-relaxed">
-                    {selectedEdge.supportingStats}
-                  </p>
+                  <h4 className="text-[#f4f4f5] font-semibold mb-3">Supporting Stats</h4>
+                  <p className="text-[#a1a1a6] text-sm leading-relaxed">{selectedEdge.supportingStats}</p>
                 </div>
               )}
 
-              {/* Similar Setups */}
               {selectedEdge.similarSetups && (
                 <div className="bg-[#09090b] border border-[#27272a] rounded-lg p-4">
-                  <h4 className="text-[#f4f4f5] font-semibold mb-3">
-                    Similar Setups
-                  </h4>
-                  <p className="text-[#a1a1a6] text-sm leading-relaxed">
-                    {selectedEdge.similarSetups}
-                  </p>
+                  <h4 className="text-[#f4f4f5] font-semibold mb-3">Similar Setups</h4>
+                  <p className="text-[#a1a1a6] text-sm leading-relaxed">{selectedEdge.similarSetups}</p>
                 </div>
               )}
 
-              {/* Market Link */}
               <div>
                 <a
                   href={selectedEdge.market.url}
@@ -426,4 +366,4 @@ export default function Dashboard() {
       )}
     </div>
   );
-    }
+}
