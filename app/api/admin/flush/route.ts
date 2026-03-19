@@ -1,16 +1,28 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { flushStaleEdgeIds } from "@/lib/storage";
+import { kv } from "@vercel/kv";
 
 export const runtime = "nodejs";
 
-// One-time utility: removes old timestamp-suffixed edge IDs from the
-// active list that accumulated before the stable-ID fix was deployed.
-// Call once via: POST /api/admin/flush
-export async function POST() {
+// POST /api/admin/flush        — removes stale timestamp-suffixed IDs
+// POST /api/admin/flush?wipe=1 — hard resets edges:active to []
+export async function POST(request: NextRequest) {
   try {
+    const wipe = request.nextUrl.searchParams.get("wipe") === "1";
+
+    if (wipe) {
+      await kv.set("edges:active", []);
+      return NextResponse.json({
+        success: true,
+        action: "wipe",
+        message: "edges:active reset to [] — all stale data cleared",
+      });
+    }
+
     const removed = await flushStaleEdgeIds();
     return NextResponse.json({
       success: true,
+      action: "flush",
       removed,
       message: removed > 0
         ? `Removed ${removed} stale edge IDs from active list`
@@ -22,4 +34,4 @@ export async function POST() {
       { status: 500 }
     );
   }
-}
+  }
