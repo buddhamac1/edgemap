@@ -5,90 +5,87 @@ import {
   MIN_VOLUME,
 } from "./constants";
 
-// ── In-memory cache ─────────────────────────────────────────
+// ── In-memory cache ───────────────────────────────────────────
 let marketCache: { data: Market[]; timestamp: number } | null = null;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-// ── Category detection ──────────────────────────────────────
+// ── Category detection ────────────────────────────────────────
 export function detectCategory(question: string): MarketCategory {
   const q = question.toLowerCase();
-
-  // Check each category's keywords; return first match
-  // Priority: specific sports leagues before generic "Sports"
   const orderedCategories: (Exclude<MarketCategory, "Other">)[] = [
-    "NBA",
-    "NFL",
-    "Sports",
-    "Crypto",
-    "Politics",
-    "Economy",
-    "Entertainment",
-    "Tech",
+    "NBA", "NFL", "Sports", "Crypto", "Politics",
+    "Economy", "Entertainment", "Tech",
   ];
-
   for (const category of orderedCategories) {
     const keywords = CATEGORY_KEYWORDS[category];
     for (const keyword of keywords) {
-      if (q.includes(keyword.toLowerCase())) {
-        return category;
-      }
+      if (q.includes(keyword.toLowerCase())) return category;
     }
   }
-
   return "Other";
 }
 
-// ── Normalize Polymarket data ───────────────────────────────
+// ── Normalize Polymarket data ─────────────────────────────────
 function normalizeMarket(raw: PolymarketMarket): Market | null {
-  // Parse prices — use outcome_prices or first token price
-  let marketProb = 50;
+  // Gamma API uses camelCase; guard both casings
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = raw as any;
+  const conditionId: string =
+    r.conditionId || r.condition_id || r.id || "";
 
-  if (raw.outcome_prices) {
+  if (!conditionId) {
+    console.warn("[Polymarket] Market missing conditionId, skipping:", r.question);
+    return null;
+  }
+
+  // Parse prices — use outcome_prices / outcomePrices or first token price
+  let marketProb = 50;
+  const outcomePrices = r.outcomePrices || r.outcome_prices;
+  if (outcomePrices) {
     try {
-      const prices = JSON.parse(raw.outcome_prices);
+      const prices = JSON.parse(outcomePrices);
       if (Array.isArray(prices) && prices.length > 0) {
         marketProb = Math.round(parseFloat(prices[0]) * 100);
       }
-    } catch {
-      // fallback to tokens
-    }
+    } catch { /* fallback to tokens */ }
   }
 
-  if (marketProb === 50 && raw.tokens?.length > 0) {
-    const yesToken = raw.tokens.find(
-      (t) => t.outcome?.toLowerCase() === "yes"
+  const tokens = r.tokens || [];
+  if (marketProb === 50 && tokens.length > 0) {
+    const yesToken = tokens.find(
+      (t: { outcome?: string; price: number }) =>
+        t.outcome?.toLowerCase() === "yes"
     );
     if (yesToken) {
       marketProb = Math.round(yesToken.price * 100);
     } else {
-      marketProb = Math.round(raw.tokens[0].price * 100);
+      marketProb = Math.round(tokens[0].price * 100);
     }
   }
 
-  const volume = raw.volume_num || raw.volume || 0;
+  const volume = r.volumeNum || r.volume_num || r.volume || 0;
 
-  // Skip low-volume markets
   if (volume < MIN_VOLUME) return null;
+  if (r.closed) return null;
 
-  // Skip closed/resolved markets
-  if (raw.closed) return null;
-
-  const category = detectCategory(raw.question);
+  const question: string = r.question || "";
+  const category = detectCategory(question);
+  const slug: string = r.marketSlug || r.market_slug || conditionId;
 
   return {
-    id: raw.condition_id,
+    id: conditionId,
     source: "polymarket",
-    question: raw.question,
+    question,
     category,
     marketProb,
     volume,
-    endDate: raw.end_date_iso || raw.game_start_time || "",
-    url: `https://polymarket.com/event/${raw.market_slug || raw.condition_id}`,
+    endDate: r.endDateIso || r.end_date_iso || r.gameStartTime || r.game_start_time || "",
+    url: `https://polymarket.com/event/${slug}`,
     rawData: raw as unknown as Record<string, unknown>,
   };
 }
 
-// ── Fetch markets ───────────────────────────────────────────
+// ── Fetch markets ─────────────────────────────────────────────
 export async function fetchMarkets(
   options: {
     category?: MarketCategory;
@@ -98,7 +95,6 @@ export async function fetchMarkets(
 ): Promise<Market[]> {
   const { category, limit = 200, forceRefresh = false } = options;
 
-  // Check cache
   if (
     !forceRefresh &&
     marketCache &&
@@ -114,7 +110,7 @@ export async function fetchMarkets(
   const allMarkets: Market[] = [];
   let cursor: string | undefined;
   let pages = 0;
-  const maxPages = 5; // Safety limit
+  const maxPages = 5;
 
   while (pages < maxPages) {
     const url = new URL(`${POLYMARKET_GAMMA_URL}/markets`);
@@ -123,14 +119,11 @@ export async function fetchMarkets(
     url.searchParams.set("closed", "false");
     url.searchParams.set("order", "volume");
     url.searchParams.set("ascending", "false");
-
-    if (cursor) {
-      url.searchParams.set("next_cursor", cursor);
-    }
+    if (cursor) url.searchParams.set("next_cursor", cursor);
 
     const res = await fetch(url.toString(), {
       headers: { Accept: "application/json" },
-      next: { revalidate: 300 }, // 5 min ISR cache
+      next: { revalidate: 300 },
     });
 
     if (!res.ok) {
@@ -139,6 +132,15 @@ export async function fetchMarkets(
     }
 
     const data = await res.json();
+
+    // Log first market keys once to help diagnose field naming
+    if (pages === 0) {
+      const sample = Array.isArray(data) ? data[0] : (data.data || [])[0];
+      if (sample) {
+        console.log("[Polymarket] Sample market keys:", Object.keys(sample).join(", "));
+      }
+    }
+
     const rawMarkets: PolymarketMarket[] = Array.isArray(data)
       ? data
       : data.data || [];
@@ -147,40 +149,29 @@ export async function fetchMarkets(
 
     for (const raw of rawMarkets) {
       const market = normalizeMarket(raw);
-      if (market) {
-        allMarkets.push(market);
-      }
+      if (market) allMarkets.push(market);
     }
 
-    // Pagination
     cursor = data.next_cursor;
     if (!cursor) break;
     pages++;
   }
 
-  // Cache the result
   marketCache = { data: allMarkets, timestamp: Date.now() };
-
   let filtered = allMarkets;
   if (category && category !== "Other") {
     filtered = filtered.filter((m) => m.category === category);
   }
-
   return filtered.slice(0, limit);
 }
 
-// ── Fetch single market ─────────────────────────────────────
+// ── Fetch single market ───────────────────────────────────────
 export async function fetchMarket(
   conditionId: string
 ): Promise<Market | null> {
   const url = `${POLYMARKET_GAMMA_URL}/markets/${conditionId}`;
-
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-  });
-
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
   if (!res.ok) return null;
-
   const raw: PolymarketMarket = await res.json();
   return normalizeMarket(raw);
 }
