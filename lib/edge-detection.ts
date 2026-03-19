@@ -18,15 +18,14 @@ import {
   setAnalysisCache,
 } from "./storage";
 
-// ── Generate edge ID ──────────────────────────────────────────────
+// ── Generate edge ID ─────────────────────────────────────────────
+// Stable ID based on market only (no timestamp) so the same market
+// always produces the same edge ID — enabling upsert deduplication.
 function generateEdgeId(market: Market): string {
-  return `edge_${market.source}_${market.id}_${Date.now()}`;
+  return `edge_${market.source}_${market.id}`;
 }
 
-// ── Check if a market needs re-analysis ───────────────────────────
-// If forceRefresh is true we always re-analyze, bypassing the cache.
-// This is critical: without it, forceRefresh only clears the Polymarket
-// fetch cache but leaves stale analysis results blocking Claude calls.
+// ── Check if a market needs re-analysis ─────────────────────────
 async function shouldAnalyze(
   market: Market,
   forceRefresh?: boolean
@@ -38,7 +37,7 @@ async function shouldAnalyze(
   return priceDiff >= 2;
 }
 
-// ── Build Edge from Market + Analysis ─────────────────────────────
+// ── Build Edge from Market + Analysis ────────────────────────────
 function buildEdge(market: Market, analysis: EdgeAnalysis): Edge {
   const edgeSize = Math.abs(analysis.estimatedProbability - market.marketProb);
   return {
@@ -63,7 +62,7 @@ function buildEdge(market: Market, analysis: EdgeAnalysis): Edge {
   };
 }
 
-// ── Fisher-Yates shuffle ──────────────────────────────────────────
+// ── Fisher-Yates shuffle ────────────────────────────────────────
 function shuffle<T>(arr: T[]): T[] {
   const out = [...arr];
   for (let i = out.length - 1; i > 0; i--) {
@@ -73,73 +72,59 @@ function shuffle<T>(arr: T[]): T[] {
   return out;
 }
 
-// ── Smart volume-tier market selection ────────────────────────────
+// ── Smart volume-tier market selection ──────────────────────────
 function prioritizeMarkets(markets: Market[]): Market[] {
   const sorted = [...markets].sort((a, b) => b.volume - a.volume);
   const tierHigh = sorted.filter((m) => m.volume >= VOLUME_TIER_HIGH);
-  const tierMid  = sorted.filter((m) => m.volume >= VOLUME_TIER_MID && m.volume < VOLUME_TIER_HIGH);
-  const tierLow  = sorted.filter((m) => m.volume < VOLUME_TIER_MID);
-
+  const tierMid = sorted.filter(
+    (m) => m.volume >= VOLUME_TIER_MID && m.volume < VOLUME_TIER_HIGH
+  );
+  const tierLow = sorted.filter((m) => m.volume < VOLUME_TIER_MID);
   const selected = [
     ...tierHigh.slice(0, TIER_HIGH_SAMPLE),
     ...shuffle(tierMid).slice(0, TIER_MID_SAMPLE),
     ...shuffle(tierLow).slice(0, TIER_LOW_SAMPLE),
   ];
-
   console.log(
     `[EdgeDetection] Tiers — high:${tierHigh.length} mid:${tierMid.length} low:${tierLow.length}`
   );
   console.log(
     `[EdgeDetection] Selected ${selected.length} markets (max ${MAX_MARKETS_PER_RUN})`
   );
-
   return selected.slice(0, MAX_MARKETS_PER_RUN);
 }
 
-// ── Main pipeline ─────────────────────────────────────────────────
+// ── Main pipeline ────────────────────────────────────────────────
 export async function runEdgeDetection(options?: {
   forceRefresh?: boolean;
 }): Promise<Edge[]> {
   const forceRefresh = options?.forceRefresh ?? false;
   console.log(`[EdgeDetection] Starting run (forceRefresh=${forceRefresh})...`);
 
-  // 1. Fetch markets (forceRefresh bypasses the 5-min Polymarket cache)
-  const markets = await fetchMarkets({
-    forceRefresh,
-    limit: 500,
-  });
+  const markets = await fetchMarkets({ forceRefresh, limit: 500 });
   console.log(`[EdgeDetection] Fetched ${markets.length} markets`);
 
-  // 2. Volume-tier sampling
   const toConsider = prioritizeMarkets(markets);
 
-  // 3. Filter to markets needing fresh analysis.
-  //    forceRefresh=true bypasses the per-market KV analysis cache so we
-  //    always re-run Claude — essential after changing the detection threshold.
   const toAnalyze: Market[] = [];
   for (const market of toConsider) {
     if (await shouldAnalyze(market, forceRefresh)) toAnalyze.push(market);
   }
-  console.log(`[EdgeDetection] ${toAnalyze.length} markets queued for Claude`);
+  console.log(`[EdgeDetection] ${toAnalyze.length} markets queued for analysis`);
 
   if (toAnalyze.length === 0) {
     console.log("[EdgeDetection] Nothing to analyze — all markets cached");
     return [];
   }
 
-  // 4. Run all markets in one parallel batch (no inter-batch delay).
-  //    MAX_MARKETS_PER_RUN=12 keeps this well inside the 60-second limit.
   const results = await Promise.allSettled(
     toAnalyze.map(async (market) => {
       const analysis = await analyzeMarket(market);
-
-      // Cache regardless of whether an edge was found
       await setAnalysisCache(market.id, {
         cachedProb: market.marketProb,
         analysis,
         timestamp: Date.now(),
       });
-
       if (analysis && analysis.hasEdge) {
         const edge = buildEdge(market, analysis);
         if (edge.edge >= MIN_EDGE) return edge;
@@ -155,12 +140,11 @@ export async function runEdgeDetection(options?: {
     }
   }
 
-  // 5. Store new edges
+  // Upsert edges — storeEdge deduplicates by stable ID
   for (const edge of newEdges) {
     await storeEdge(edge);
   }
 
-  // 6. Sort by edge × confidence weight
   newEdges.sort((a, b) => {
     const aScore = a.edge * CONFIDENCE_ORDER[a.confidence];
     const bScore = b.edge * CONFIDENCE_ORDER[b.confidence];
@@ -168,7 +152,7 @@ export async function runEdgeDetection(options?: {
   });
 
   console.log(
-    `[EdgeDetection] Done — ${newEdges.length} new edges (MIN_EDGE=${MIN_EDGE}%)`
+    `[EdgeDetection] Done — ${newEdges.length} edges stored (MIN_EDGE=${MIN_EDGE}%)`
   );
   return newEdges;
 }
