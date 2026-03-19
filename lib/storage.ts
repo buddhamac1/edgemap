@@ -31,17 +31,26 @@ async function del(key: string): Promise<void> {
   }
 }
 
-// ── Edge operations ────────────────────────────────────────────
+// ── Edge operations ──────────────────────────────────────────────
 const ACTIVE_EDGES_KEY = "edges:active";
 const RESOLVED_EDGES_KEY = "edges:resolved";
 
 export async function storeEdge(edge: Edge): Promise<void> {
   await set(`edge:${edge.id}`, edge);
-  const activeIds = (await get<string[]>(ACTIVE_EDGES_KEY)) || [];
+  let activeIds = (await get<string[]>(ACTIVE_EDGES_KEY)) || [];
+
+  // Remove any stale timestamp-suffixed variants of this same market.
+  // Old IDs were: edge_source_marketId_1234567890123
+  // New IDs are:  edge_source_marketId
+  // Stale entries start with the stable ID followed by "_<digits>"
+  activeIds = activeIds.filter(
+    (id) => !(id !== edge.id && id.startsWith(edge.id + "_") && /^edge_[^_]+_[^_]+_d+$/.test(id))
+  );
+
   if (!activeIds.includes(edge.id)) {
     activeIds.push(edge.id);
-    await set(ACTIVE_EDGES_KEY, activeIds);
   }
+  await set(ACTIVE_EDGES_KEY, activeIds);
 }
 
 export async function getEdge(edgeId: string): Promise<Edge | null> {
@@ -103,7 +112,7 @@ export async function fadeEdge(edgeId: string): Promise<void> {
   await set(ACTIVE_EDGES_KEY, activeIds.filter((id) => id !== edgeId));
 }
 
-// ── Analysis cache ─────────────────────────────────────────────
+// ── Analysis cache ────────────────────────────────────────────────
 interface CachedAnalysis {
   cachedProb: number;
   analysis: EdgeAnalysis | null;
@@ -129,7 +138,20 @@ export async function setAnalysisCache(
   await set(`analysis:cache:${marketId}`, data, 60 * 60 * 1000);
 }
 
-// ── Aggregate stats ────────────────────────────────────────────
+// ── Flush stale edges ─────────────────────────────────────────────
+// Removes any timestamp-suffixed IDs (old format) from the active list.
+export async function flushStaleEdgeIds(): Promise<number> {
+  const activeIds = (await get<string[]>(ACTIVE_EDGES_KEY)) || [];
+  const cleaned = activeIds.filter((id) => !/^edge_[^_]+_[^_]+_d+$/.test(id));
+  const removed = activeIds.length - cleaned.length;
+  if (removed > 0) {
+    await set(ACTIVE_EDGES_KEY, cleaned);
+    console.log(`[Storage] Flushed ${removed} stale edge IDs`);
+  }
+  return removed;
+}
+
+// ── Aggregate stats ───────────────────────────────────────────────
 const STATS_KEY = "stats:aggregate";
 
 export async function getStats(): Promise<AggregateStats> {
@@ -171,4 +193,4 @@ async function updateStats(
   stats.hitRate = total > 0 ? Math.round((stats.hits / total) * 100) : 0;
   stats.totalSignals++;
   await set(STATS_KEY, stats);
-}
+  }
